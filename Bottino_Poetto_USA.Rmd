@@ -1,0 +1,1598 @@
+---
+title: "Dynamic Hierarchical Modeling for U.S. Presidential Forecast"
+author: "Poetto Patrick - 5201214, Manuel Bottino - 5201213"
+date: "`r Sys.Date()`"
+output:
+  bookdown::pdf_document2:
+    toc: false
+  pdf_document: default
+  officedown::rdocx_document: default
+  bookdown::html_document2: default
+fig.caption: yes
+always_allow_html: yes
+header-includes:
+  - \usepackage{xcolor}
+  - \usepackage{graphicx}
+  - \usepackage{float}
+  - \usepackage{subcaption}
+  - \definecolor{palegreentwo}{rgb}{0.90196, 1, 0.8902}
+  - \definecolor{lemon}{rgb}{1, 0.95, 0.90}
+  - \definecolor{white}{rgb}{1, 1, 1}
+bibliography: bibliography.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(classInt)
+library(sf)
+library(sp)
+library(terra)
+# for loading our data
+library(jsonlite)
+# for plotting
+library(extrafont)
+library(patchwork)
+library(scico)
+# for data wrangling
+library(dplyr)
+library(viridis)
+library(kableExtra)
+library (knitr)
+library(xts)
+library (ggplot2)
+library (patchwork)
+library (TSA)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library (MTS)
+library(tigris)
+library(tidyverse, quietly = TRUE)
+library(rstan, quietly = TRUE)
+library(stringr, quietly = TRUE)
+library(lubridate, quietly = TRUE)
+library(gridExtra, quietly = TRUE)
+library(pbapply, quietly = TRUE)
+library(parallel, quietly = TRUE)
+library(boot, quietly = TRUE)
+library(lqmm, quietly = TRUE) 
+library(ggrepel, quietly = TRUE)
+```
+
+# Introduction {#Introduction}
+
+The United States presidential rush represents the most important political event worldwide. 
+Every four years, the two major parties primary winners compete for $538$ voters in a single round with a clear majority. 
+The candidates who gets to win at least $270$ votes gains the Presidential mandate. 
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}[b]{0.49\textwidth}
+    \includegraphics[width=\textwidth]{1_emptymap .png}
+    \caption{General Elections Map}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.49\textwidth}
+    \includegraphics[width=\textwidth]{2_2020map.png}
+    \caption{2020 Final Results}
+  \end{subfigure}
+\end{figure}
+
+
+Despite the wider and wider data availability and accessibility, forecasting the outcome of such complex events as modern election cycles is still a tough task as eminent precedents such as the disastrous failure of the $2016$ presidential forecasts ([\underline{Why 2016 election polls missed their mark}](https://www.pewresearch.org/short-reads/2016/11/09/why-2016-election-polls-missed-their-mark/)) and the against-all-odds outcome of the UK Brexit referendum ([\underline{Here’s why the majority of Brexit polls were wrong}](https://www.cnbc.com/2016/07/04/why-the-majority-of-brexit-polls-were-wrong.html)) have shown in the close past. 
+
+This project is aimed at modeling vote intentions at the day of the elections in order to forecast the $2024$ new President. The present work bases on [@Linzer] proposal which has been then updated by [@Heidemanns] and tries to implement the modeling procedure closely following the one used by "The Economist" journal ([\underline{How The Economist’s presidential forecast works}](https://www.economist.com/interactive/us-2024-election/prediction-model/president/how-this-works)) for the $2020$ and $2024$ rushes, which implementation is available at this [\underline{link}](https://github.com/TheEconomist/us-potus-model). The vote intention forecasts for Election Day are conducted following a Bayesian dynamic hierarchical structured model by combining fundamentals and trial-heat polls ([\underline{see section 2}](#DataandMethods)) as predictors. As stated by [@Heidemanns], while fundamentals such as economic growth and presidential approval are highly predictive early in the electoral cycle due to electors tendence in evaluating whether the party in charge is doing well or not,  Trial-heat polls become more predictive as we approach Election Day since there is a natural convergence of intentions toward actual vote as Election day gets closer (e.g. if one elector has a specific vote intention, that intention will be much less likely to change two days before Election day rather than six months before).
+
+# Data and methods {#DataandMethods}
+
+## Data 
+
+All the data used to fit the model comes from two main sources: 
+
+- Polls: trial-heat results coming from different pollsters both nationwide and statewide at different times: different bias terms for this kind of records will arise since despite the usual statistical procedure to ensure the consistency of the randomness assumption, achieving such a goal is almost impossible due to different hard to abate biases. Modeling of biases and variance will be faced more specifically in the following section, taking into account the fact that different pollsters tend to favor one candidate over the other, the survey mode has a specific impact on the results collected, and most importantly, correction terms for differential nonresponse rates have to be included. This last issue became a big deal since in the close past most forecasts have failed supposedly due to it. People who are contacted for the poll and decide not to participate represent a latent effect that must be taken into account, specifically if they can be identified as Republicans or Democrats. The difference between the former and latter in the sampled population who doesn't respond is meaningful in terms of forecast correction. 
+
+- Social and economic data: this category does include geographical features that are proposed by means of variance-covariance matrices that represent the spatial correlation of the population features, which is clearly disclosed by looking at any election map where most of the times one may notice the west and east coasts are usually blue (democrats) while the inland has in general a republican prevalence. In principle, a spatial correlation must be somehow taken into account according to Tobler's first law of geography. Other meaningful data are recorded to keep track of social features of the population like the percentage of white evangelics rather than other ethnicities prevalence in specific regions, the education rates and the per capita GDP. 
+
+Data source: https://projects.fivethirtyeight.com/polls/president-general/2024/national/
+
+
+## Data processing 
+
+In this section the data pre-processing procedure implemented to wrangle the data is presented (see the code for the details). First of all, the Stan environment is set up with specific parameters, including the number of cores, chains, and sampling periods, to optimize the Bayesian computation ([see the implementation paragraph](#Implementation)). The primary task is to preprocess and clean polling data from two sources: "all_polls_2012.csv" and "president_polls_2024.csv". This involves reading in the datasets, standardizing state names, and selecting relevant columns. The data is then reshaped to create one column per candidate. Additional columns are computed to represent the sum of non-important candidate percentages (others) and the percentage of undecided voters. Missing values are handled with zeros to ensure data completeness and consistency.
+Subsequently, the code defines three essential functions for further analysis. The cov_matrix function generates a variance-covariance matrix, which is crucial for understanding the relationships between variables. The mean_low_high function computes the mean and confidence intervals for the draws, providing a statistical summary of the data. The check_cov_matrix function is used to validate the covariance matrix by printing histograms and calculating the national standard deviation.
+In the data wrangling section, the code selects relevant columns from the processed polling data and performs basic data transformations. It handles missing values and inconsistencies in pollster names, and computes vote shares for the candidates. Numerical indices for states, days, weeks, and pollsters are created to facilitate further analysis.
+The code then retrieves state contextual information from 2012 data, including state names, electoral votes, and prior differences in scores. It calculates state weights based on the share of the national vote and creates covariance matrices. Various demographic and socioeconomic variables are merged from different sources, including census data, urbanicity indices, and the percentage of white evangelical populations. The data is normalized and transformed into a wide format for easier manipulation and analysis.
+
+
+```{r setup_dataset, include= FALSE}
+#################################
+### STAN SETUP SPECIFICATIONS ###
+#################################
+
+options(mc.cores = 6)
+n_chains <- 6
+n_cores <- 6
+n_sampling <- 500
+n_warmup <- 500
+n_refresh <- n_sampling*0.1
+
+##########################################
+### POLLS DATA PROCESSING AND CLEANING ###
+##########################################
+all_polls <- read_csv('data/all_polls_2012.csv')
+target_col =  colnames(all_polls)
+
+all_polls_mine = read.csv("data/president_polls_2024.csv")
+all_polls_mine$state = state.abb[match(all_polls_mine$state,state.name)]
+all_polls_mine$state <- ifelse(is.na(all_polls_mine$state), "", all_polls_mine$state)
+
+mine_col = colnames(all_polls_mine)
+n_polls = length(unique(all_polls_mine$poll_id))
+all_polls_mine = all_polls_mine %>% select("state", "pollster","question_id", "pollster_id", "poll_id", "methodology", "start_date","end_date", "candidate_name", "sample_size", "population", "pct")
+candidate_df = all_polls_mine %>% group_by(poll_id,question_id, candidate_name) %>% reframe(pct = mean(pct), pollster = first(pollster), pollster_id = first(pollster_id), methodology = first(methodology), start_date = first(start_date), end_date = first(end_date), sample_size = first(sample_size), population = first(population), state = first(state))
+max(dmy(all_polls_mine$end_date))
+#head(candidate_df)
+#candidate_df[candidate_df$poll_id==74995, ]
+#ll_polls_mine[all_polls_mine$poll_id==74995, ] 
+#candidate_df[candidate_df$question_id==140851, ]
+#all_polls_mine[all_polls_mine$question_id==140851, ]
+#candidate
+
+pivot_df = pivot_wider(candidate_df, names_from = candidate_name, values_from = pct)
+
+# Specify the two most important candidates
+important_candidates <- c("Joe Biden", "Donald Trump")
+
+# Process the data
+processed_polls <- pivot_df %>%
+  # Calculate the 'others' column by summing all non-important candidate columns
+  mutate(others = rowSums(select(., -c(state, pollster, question_id, pollster_id, poll_id, methodology, start_date, end_date, sample_size, population, all_of(important_candidates))), na.rm = TRUE)) %>%
+  # Calculate the 'undecided' column
+  mutate(undecided = 100 - rowSums(select(., all_of(important_candidates), others), na.rm = TRUE)) %>%
+  # Select and reorder the columns
+  select(state, pollster, sample_size, start_date, end_date, all_of(important_candidates), others, undecided, methodology, population)
+#head(processed_polls)
+# Replace NA with 0 in specified columns
+processed_polls <- processed_polls %>%
+  mutate_at(vars(`Donald Trump`, `Joe Biden`, `others`, `undecided`), ~replace(., is.na(.), 0))
+
+
+colnames(processed_polls) = target_col
+colnames(processed_polls)[6:7] = important_candidates
+```
+
+```{r data_preprocessing, include= FALSE}
+###################################
+### USEFUL FUNCTIONS DEFINITION ###
+###################################
+
+## Functions
+cov_matrix <- function(n, sigma2, rho){
+  m <- matrix(nrow = n, ncol = n)
+  m[upper.tri(m)] <- rho
+  m[lower.tri(m)] <- rho
+  diag(m) <- 1
+  (sigma2^.5 * diag(n))  %*% m %*% (sigma2^.5 * diag(n))
+}
+
+mean_low_high <- function(draws, states, id){
+  tmp <- draws
+  draws_df <- data.frame(mean = inv.logit(apply(tmp, MARGIN = 2, mean)),
+                         high = inv.logit(apply(tmp, MARGIN = 2, mean) + 1.96 * apply(tmp, MARGIN = 2, sd)), 
+                         low  = inv.logit(apply(tmp, MARGIN = 2, mean) - 1.96 * apply(tmp, MARGIN = 2, sd)),
+                         state = states, 
+                         type = id)
+  return(draws_df) 
+}
+# Enhanced function to check and plot covariance matrix with better labels and titles
+check_cov_matrix <- function(mat, wt=state_weights, title="Correlation and Standard Deviation Analysis") {
+  # Check if the matrix and weights are numeric
+  if (!is.numeric(mat) || !is.numeric(wt)) {
+    stop("Both 'mat' and 'wt' must be numeric.")
+  }
+  
+  # Check if the dimensions of the weights match the matrix
+  if (ncol(mat) != length(wt)) {
+    stop("The length of 'wt' must match the dimensions of 'mat'.")
+  }
+  
+  # Get diagonals
+  s_diag <- sqrt(diag(mat))
+  
+  # Output correlation matrix
+  cor_equiv <- cov2cor(mat)
+  diag(cor_equiv) <- NA
+  
+  # Output equivalent national standard deviation
+  nat_product <- sqrt(t(wt) %*% mat %*% wt) / 4
+  
+  # Set up plotting area
+  par(mfrow=c(3,1), mar=c(5,4,4,2) + 0.1, mgp=c(3,1,0), tck=-0.01)
+  
+  # Plot correlation histogram
+  hist(as.vector(cor_equiv), breaks=10, 
+       main=paste(title, " - Correlation Histogram"), 
+       xlab="Correlation", 
+       col="lightblue", 
+       border="white",
+       cex.main=1.5,
+       cex.lab=1.2,
+       cex.axis=1.2)
+  
+  # Plot standard deviation histogram
+  hist(s_diag, breaks=10, 
+       main=paste(title, " - Standard Deviation Histogram"), 
+       xlab="Standard Deviation", 
+       col="lightgreen", 
+       border="white",
+       cex.main=1.5,
+       cex.lab=1.2,
+       cex.axis=1.2)
+  
+  # Print and output equivalent national standard deviation
+  print(sprintf('National SD of %s', round(nat_product, 4)))
+  
+  # Display equivalent national standard deviation as text
+  plot.new()
+  text(0.5, 0.5, sprintf('National SD: %s', round(nat_product, 4)), 
+       cex=1.5, col="darkred", font=2)
+}
+
+## Master variables
+RUN_DATE <- ymd("2024-07-12")
+#RUN_DATE <- ymd("2008-08-11")
+
+election_day <- ymd("2024-11-05")
+start_date <- as.Date("2023-10-01") 
+
+
+# wrangle polls -----------------------------------------------------------
+
+# select relevant columns from HufFPost polls
+all_polls <- processed_polls %>%
+  dplyr::select(state, pollster, number.of.observations, mode,population,
+                start.date, 
+                end.date,
+                all_of(important_candidates), undecided, other)%>%
+  mutate(end.date = mdy(end.date),
+         start.date = mdy(start.date))
+
+
+# make sure we've got nothing from the futuree
+all_polls <- all_polls %>%
+  filter(ymd(end.date) <= RUN_DATE)
+
+# basic mutations
+df <- all_polls %>% 
+  as_tibble() %>%
+  rename(n = number.of.observations) %>%
+  mutate(begin = ymd(start.date),
+         end   = ymd(end.date),
+         t = end - (1 + as.numeric(end-begin)) %/% 2) %>%
+  filter(t >= start_date & !is.na(t)
+         & n > 1) 
+
+# pollster mutations
+df <- df %>%
+  mutate(pollster = str_extract(pollster, pattern = "[A-z0-9 ]+") %>% sub("\\s+$", "", .),
+         pollster = replace(pollster, pollster == "Fox News", "FOX"), # Fixing inconsistencies in pollster names
+         pollster = replace(pollster, pollster == "WashPost", "Washington Post"),
+         pollster = replace(pollster, pollster == "ABC News", "ABC"),
+         undecided = ifelse(is.na(undecided), 0, undecided),
+         other = ifelse(is.na(other), 0, other))
+
+
+# vote shares etc
+df <- df %>%
+  mutate(
+    two_party_sum = `Donald Trump` + `Joe Biden`,
+    polltype = as.integer(as.character(recode(population, 
+                                              "lv" = "0", 
+                                              "rv" = "1",
+                                              "a" = "2",
+                                              "v" = "3"))), 
+    n_respondents = round(n),
+    # Donald Trump
+    n_trump = round(n * `Donald Trump` / 100),
+    pct_trump = `Donald Trump` / two_party_sum,
+    # Joe Biden
+    n_biden = round(n * `Joe Biden` / 100),
+    pct_biden = `Joe Biden` / two_party_sum,
+    # third-party
+    n_other = round(n * other / 100),
+    p_other = other / 100
+  )
+
+
+# Numerical indices passed to Stan for states, days, weeks, pollsters
+## --- numerical indices
+state_abb_list <- read.csv("data/potus_results_76_16.csv") %>%
+  pull(state) %>% unique()
+
+df$state <- ifelse(df$state == "", "--", df$state)
+
+df <- df %>% 
+  mutate(poll_day = t - min(t) + 1,
+         # Factors are alphabetically sorted: 1 = --, 2 = AL, 3 = AK, 4 = AZ...
+         index_s = as.numeric(factor(as.character(state),
+                                     levels = c('--',state_abb_list))),
+         index_s = ifelse(index_s == 1, 52, index_s - 1),
+         index_t = 1 + as.numeric(t) - min(as.numeric(t)),
+         index_p = as.numeric(as.factor(as.character(pollster))),
+         index_m = as.numeric(as.factor(as.character(mode))),
+         index_pop = as.numeric(as.factor(as.character(polltype)))) %>%
+  # selections
+  arrange(state, t, polltype, two_party_sum) %>% 
+  distinct(state, t, pollster, .keep_all = TRUE) %>%
+  select(
+    # poll information
+    state, t, begin, end, pollster, polltype, method = mode, n_respondents, 
+    # vote shares
+    pct_biden, n_biden, 
+    pct_trump, n_trump,
+    poll_day, index_s, index_p, index_m, index_pop, index_t)
+
+# useful vectors
+all_polled_states <- df$state %>% unique %>% sort
+
+# day indices
+first_day <- min(df$begin)
+ndays <- max(df$t) - min(df$t)
+all_t <- min(df$t) + days(0:(ndays))
+all_t_until_election <- min(all_t) + days(0:(election_day - min(all_t)))
+# pollster indices
+all_pollsters <- levels(as.factor(as.character(df$pollster)))
+
+
+# getting state contextual information from 2008 --------------------------
+# (1) get state_names and EV        
+# (2) set priors on mu_b and alpha,
+# (3) get state_weights,           
+#setwd(here("data/"))
+states2012 <- read.csv("data/2012.csv", 
+                       header = TRUE, stringsAsFactors = FALSE) %>% 
+  mutate(score = obama_count / (obama_count + romney_count),
+         national_score = sum(obama_count)/sum(obama_count + romney_count),
+         delta = score - national_score,
+         share_national_vote = (total_count*(1+adult_pop_growth_2011_15))
+         /sum(total_count*(1+adult_pop_growth_2011_15))) %>%
+  arrange(state)
+
+state_abb <- states2012$state
+rownames(states2012) <- state_abb
+
+# get state indices
+all_states <- states2012$state
+state_name <- states2012$state_name
+names(state_name) <- state_abb
+
+# set prior differences
+prior_diff_score <- states2012$delta
+names(prior_diff_score) <- state_abb
+
+# set state weights
+state_weights <- c(states2012$share_national_vote / sum(states2012$share_national_vote))
+names(state_weights) <- state_abb
+
+# electoral votes, by state:
+ev_state <- states2012$ev
+names(ev_state) <- state_abb
+
+# create covariance matrices ----------------------------------------------
+# start by reading in data
+state_data <- read.csv("data/potus_results_76_16.csv")
+state_data <- state_data %>% 
+  select(year, state, dem) %>%
+  group_by(state) %>%
+  mutate(dem = dem ) %>% #mutate(dem = dem - lag(dem)) %>%
+  select(state,variable=year,value=dem)  %>%
+  ungroup() %>%
+  na.omit() %>%
+  filter(variable == 2016)
+
+census <- read.csv('data/acs_2013_variables.csv')
+census <- census %>%
+  filter(!is.na(state)) %>% 
+  select(-c(state_fips,pop_total,pop_density)) %>%
+  group_by(state) %>%
+  gather(variable,value,
+         1:(ncol(.)-1))
+
+state_data <- state_data %>%
+  mutate(variable = as.character(variable)) %>%
+  bind_rows(census)
+
+# add urbanicity
+urbanicity <- read.csv('data/urbanicity_index.csv') %>%
+  dplyr::select(state,pop_density = average_log_pop_within_5_miles) %>%
+  gather(variable,value,
+         2:(ncol(.)))
+
+state_data <- state_data %>%
+  bind_rows(urbanicity)
+
+# add pct white evangelical
+white_evangel_pct <- read_csv('data/white_evangel_pct.csv') %>%
+  gather(variable,value,
+         2:(ncol(.)))
+
+state_data <- state_data %>%
+  bind_rows(white_evangel_pct)
+
+# add region, as a dummy for each region
+regions <- read_csv('data/state_region_crosswalk.csv') %>%
+  select(state = state_abb, variable=region) %>%
+  mutate(value = 1) %>%
+  spread(variable,value)
+
+regions[is.na(regions)] <- 0
+
+regions <- regions %>%
+  gather(variable,value,2:ncol(.))
+
+#state_data <- state_data %>%
+#  bind_rows(regions)
+
+# scale and spread
+state_data_long <- state_data %>%
+  group_by(variable) %>%
+  # scale all varaibles
+  mutate(value = (value - min(value, na.rm=T)) / 
+           (max(value, na.rm=T) - min(value, na.rm=T))) %>%
+  #mutate(value = (value - mean(value)) / sd(value)) %>%
+  # now spread
+  spread(state, value) %>% 
+  na.omit() %>%
+  ungroup() %>%
+  select(-variable)
+```
+
+## Visualization
+
+As stated in the previous paragraph, the hierarchical model mainly combines trial heat polls and socio economic data.
+ Some visualization to get an idea of how do they look like is proposed in the following with no aim of completeness. 
+ Data visualization in this setting may not be so meaningful since most of the data has the very same structure (as all the polls) 
+ or may be already well known (economical features of the United States). Only a couple of example to get an idea of the main structure 
+ are proposed. 
+
+
+```{r boxplot, echo=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+suppressMessages(suppressWarnings({ggplot(processed_polls, aes(x = state, y = `Donald Trump`, fill = "Donald Trump")) +
+  geom_boxplot() +
+  geom_boxplot(aes(y = `Joe Biden`, fill = "Joe Biden")) +
+  scale_fill_manual(values = c("Donald Trump" = "red", "Joe Biden" = "blue")) +
+  theme_bw() +
+  labs(title = "2024 polls distribution Statewide",
+       x = "State",
+       y = "Percentage",
+       fill = "Candidate") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = c(.92, 1),
+        legend.title = element_text(size = 9),
+        legend.text = element_text(size = 7),   
+        legend.key.size = unit(1.5, "lines"),   
+        legend.key.height = unit(1, "lines"),    
+        legend.key.width = unit(2, "lines"))}))
+```
+
+```{r line_graph, echo=FALSE, fig.align='center', fig.height=3, warning=FALSE}
+election_results_2012p <- read.csv("data/2012.csv")
+election_results_2016p <- read.csv("data/potus_results_76_16.csv") %>%
+  filter(year == 2016)
+
+election_comparison <- election_results_2012p %>%
+  select(state, obama, romney) %>%
+  rename(dem_2012 = obama, rep_2012 = romney) %>%
+  left_join(election_results_2016p %>%
+              select(state, dem) %>%
+              rename(dem_2016 = dem), by = "state")
+
+ggplot(election_comparison, aes(x = dem_2012, y = dem_2016)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  theme_bw() +
+  labs(title = "2012 vs. 2016 final results comparison",
+       x = "Democrat votes in 2012",
+       y = "Democrat votes in 2016") +
+  geom_text_repel(aes(label = state))
+```
+
+```{r census_graph, echo=FALSE, fig.align='center', fig.height=5.9, warning=FALSE, paged.print=FALSE}
+censusp <- read.csv('data/acs_2013_variables.csv')
+census_filtered <- censusp %>% 
+  select(state, white_pct, black_pct, hisp_other_pct) %>%
+  pivot_longer(cols = white_pct:hisp_other_pct, names_to = "variable", values_to = "value")
+
+
+# Plot
+ethn = ggplot(census_filtered, aes(x = state, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_bw() +
+  labs(title = "Ethnic prevalence statewide",
+       x = "State",
+       y = "Percentage",
+       fill = "Ethnicity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "bottom", legend.direction = "horizontal")
+
+census_education_age <- censusp %>% 
+  select(state, college_pct, wwc_pct) %>%
+  pivot_longer(cols = college_pct:wwc_pct, names_to = "variable", values_to = "value")
+
+socio = ggplot(census_education_age, aes(x = state, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_bw() +
+  labs(title = "College graduated and white working class statewide",
+       x = "State",
+       y = "Percentage",
+       fill = "Variable") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        legend.position = "bottom", legend.direction = "horizontal")
+
+ethn/socio
+```
+
+
+```{r census_graph_1, echo=FALSE, fig.align='center', fig.height=3.4, warning=FALSE}
+censusp <- read.csv('data/acs_2013_variables.csv')
+census_cleaned <- censusp %>%
+  select(state, white_pct, black_pct, hisp_other_pct, college_pct, wwc_pct, median_age, pop_density)
+census_relevant <- census_cleaned %>%
+  filter(!is.na(pop_density)) %>%
+  select(state, pop_density, median_age)
+
+ggplot(census_relevant, aes(x = reorder(state, pop_density), y = pop_density)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  geom_line(aes(y = median_age * 200, group = 1), color = "darkseagreen", size = 1) +
+  scale_y_continuous(
+    name = "Population Density",
+    sec.axis = sec_axis(~ . / 200, name = "Median Age")
+  ) +
+  theme_bw() +
+  labs(
+    title = "Society features",
+    x = "State"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+## Methods for inference approximation - STAN Package
+
+The Stan package will be used to approximate Bayesian inference in the following sections. This package allows for the analysis of complex statistical models using Bayesian approaches, which combine prior information with observed data to update the probability distributions of model parameters. Stan employs the Hamiltonian Monte Carlo (HMC) method to efficiently sample from posterior distributions, overcoming the limitations of traditional methods like Metropolis-Hastings. This enables accurate and reliable estimates even for high-dimensional models. The specifications that have been set at beginning of this section allow to enhance parallel computation. 
+
+The Hamiltonian Monte Carlo is a method that improves sampling efficiency by using the geometry of the parameter space:
+
+1.	Hamiltonian Dynamics: HMC treats the target distribution as a physical system where each parameter $\theta$ represents a position in space, and an auxiliary variable $p$ (momentum) is introduced. The joint density of $(\theta, p)$ defines a Hamiltonian $H(\theta, p) = U(\theta) + K(p)$, where:
+- $U(\theta)$  is the potential energy, given by the negative log probability of the target distribution.
+-	$K(p)$  is the kinetic energy, typically chosen as  $K(p) = \frac{1}{2} p^T M^{-1} p$ , where $M$ is a mass matrix.
+
+
+2.	Leapfrog Integrator: To simulate the Hamiltonian dynamics, HMC uses the leapfrog integrator, which approximates the continuous trajectories by alternating small steps for updating positions and momenta. This ensures volume preservation and reversibility.
+
+3.	Proposal Generation: Starting from the current state $(\theta, p)$, the leapfrog integrator generates a proposal by simulating the dynamics for a specified number of steps and step size. The proposal $(\theta^{\prime}, p^{\prime})$ is then evaluated.
+
+4.	Metropolis-Hastings Correction: To ensure the correct target distribution, the Metropolis-Hastings acceptance step is applied to the proposal. The acceptance probability is determined by the change in Hamiltonian, ensuring detailed balance.
+	
+To set up a model in Stan, a block structure is required, where in each block a specific feature is defined (e.g. data, parameters ecc.) and eventually a model block is defined along with priors and likelihood to run the model. Other blocks may then be defined to retrieve quantities derived after the sampling. 
+
+## Model
+
+```{r stan_data_setup, include= FALSE}
+# compute the correlation matrix
+# formula is
+# a*(lambda*C + (1-lambda)*C_1)
+# where C is our correlation matrix with min 0
+# and C_1 is a sq matrix with all 1's
+# lambda=0 is 100% correlation, lambda=1 is our corr matrix
+
+# save correlation 
+C <- cor(state_data_long)  
+
+# increase the baseline correlation of the matrix to correspond to national-level error
+C[C < 0] <- 0 # baseline cor for national poll error
+
+
+tmp_C <- C
+diag(tmp_C) <- NA
+mean(tmp_C,na.rm=T)
+
+# mixing with matrix of 0.5s
+lambda <- 0.75
+C_1 <- matrix(data=1,nrow = 51,ncol=51)
+a <- 1
+new_C <- (lambda*C + (1-lambda)*C_1) %>% make.positive.definite()
+
+tmp <- new_C
+diag(tmp) <- NA
+mean(tmp,na.rm=T)
+
+state_correlation_polling <- new_C
+
+# make pos definite
+state_correlation_polling <- make.positive.definite(state_correlation_polling)
+
+# covariance matrix for polling error
+state_covariance_polling_bias <- cov_matrix(51, 0.078^2, 0.9) # 3.4% on elec day
+state_covariance_polling_bias <- state_covariance_polling_bias * state_correlation_polling
+
+(sqrt(t(state_weights) %*% state_covariance_polling_bias %*% state_weights) / 4)
+mean(apply(MASS::mvrnorm(100,rep(0,51),state_covariance_polling_bias),2,sd) /4) 
+
+# covariance for prior e-day prediction
+state_covariance_mu_b_T <- cov_matrix(n = 51, sigma2 = 0.18^2, rho = 0.9) # 6% on elec day
+state_covariance_mu_b_T <- state_covariance_mu_b_T * state_correlation_polling
+
+(sqrt(t(state_weights) %*% state_covariance_mu_b_T %*% state_weights) / 4)
+mean(apply(MASS::mvrnorm(100,rep(0,51),state_covariance_mu_b_T),2,sd) /4) 
+
+# covariance matrix for random walks
+state_covariance_mu_b_walk <- cov_matrix(51, (0.017)^2, 0.9)
+state_covariance_mu_b_walk <- state_covariance_mu_b_walk * state_correlation_polling # we want the demo correlations for filling in gaps in the polls
+
+(sqrt(t(state_weights) %*% state_covariance_mu_b_walk %*% state_weights) / 4) * sqrt(300)
+mean(apply(MASS::mvrnorm(100,rep(0,51),state_covariance_mu_b_walk),2,sd) /4) * sqrt(300)
+
+## MAKE DEFAULT COV MATRICES
+# we're going to make TWO covariance matrix here and pass it
+# and 3 scaling values to stan, where the 3 values are 
+# (1) the national sd on the polls, (2) the national sd
+# on the prior and (3) the national sd of the random walk
+# make initial covariance matrix (using specified correlation)
+state_covariance_0 <- cov_matrix(51, 0.07^2, 0.9)
+state_covariance_0 <- state_covariance_0 * state_correlation_polling # we want the demo correlations for filling in gaps in the polls
+
+# national error of:
+sqrt(t(state_weights) %*% state_covariance_0 %*% state_weights) / 4
+
+# save the inital scaling factor
+national_cov_matrix_error_sd <- sqrt(t(state_weights) %*% state_covariance_0 %*% state_weights) %>% as.numeric()
+national_cov_matrix_error_sd
+
+# save the other scales for later
+fit_rmse_day_x <- function(x){0.03 +  (10^-6.6)*(x)^2} # fit to error from external script
+fit_rmse_day_x(0:300)
+days_til_election <- as.numeric(difftime(election_day,RUN_DATE))
+expected_national_mu_b_T_error <- fit_rmse_day_x(days_til_election)
+
+polling_bias_scale <- 0.013 # on the probability scale -- we convert later down
+mu_b_T_scale <- expected_national_mu_b_T_error # on the probability scale -- we convert later down
+random_walk_scale <- 0.05/sqrt(300) # on the probability scale -- we convert later down
+
+# gen fake matrices, check the math (this is recreated in stan)
+national_cov_matrix_error_sd <- sqrt(t(state_weights) %*% state_covariance_0 %*% state_weights) %>% as.numeric()
+
+ss_cov_poll_bias = state_covariance_0 * (polling_bias_scale/national_cov_matrix_error_sd*4)^2
+ss_cov_mu_b_T = state_covariance_0 * (mu_b_T_scale/national_cov_matrix_error_sd*4)^2
+ss_cov_mu_b_walk = state_covariance_0 * (random_walk_scale/national_cov_matrix_error_sd*4)^2
+
+sqrt(t(state_weights) %*% ss_cov_poll_bias %*% state_weights) / 4 
+sqrt(t(state_weights) %*% ss_cov_mu_b_T %*% state_weights) / 4 
+sqrt(t(state_weights) %*% ss_cov_mu_b_walk %*% state_weights) / 4 * sqrt(300)
+```
+
+
+
+```{r include= FALSE}
+# poll bias should be:
+err <- c(0.5, 1.9, 0.8, 7.2, 1.0, 1.4, 0.1, 3.3, 3.4, 0.9, 0.3, 2.7, 1.0) / 2 
+sqrt(mean(err^2))
+
+# implied national posterior on e-day
+1 / sqrt( 1/((sqrt(t(state_weights) %*% state_covariance_polling_bias %*% state_weights) / 4)^2) + 
+            1/((sqrt(t(state_weights) %*% state_covariance_mu_b_T %*% state_weights) / 4)^2) )
+```
+
+
+
+
+
+Following [@Linzer], [@Heidemanns] set up a model that generates a comprehensive Election Day forecast by integrating 
+two primary sources of information: historical analysis incorporating economically and politically significant variables 
+(such as personal income growth, presidential approval ratings, and incumbency status) and real-time data from state 
+and national polls conducted during the election season. These two streams of data are synthesized through a time-series model
+that evaluates state and national opinion trends. Additionally, the model addresses certain aspects of non-sampling errors inherent 
+in polling methodologies.
+This combination of the two sources of information in a model, also known as fundamentals-based model, was first introduced by [@Abramowitz]
+with the “Time-for-Change” model, a forecasting approach developed by political scientist to predict the outcomes of U.S. presidential elections. 
+This model is based on three key indicators that are known long before Election Day:
+
+1.	Economic Growth: The growth rate of the economy during the second quarter of the election year, 
+and the economic conditions significantly influence voting behavior, with voters likely to reward the incumbent party during periods of economic growth and penalize it during economic downturns.
+
+2.	Presidential Approval: The incumbent president’s approval rating at mid-year.
+
+3.	Time-for-Change Factor: The length of time the incumbent president’s party has controlled the White House. 
+There is an electoral fatigue factor where voters tend to prefer a change after a party has been in power for two or more terms. This reflects a desire for periodic alternation in political leadership.
+
+In this sense one novelty introduced by [@Heidemanns] is an interaction term between the economic growth and the share of swing voters in the electorate, as measured by American National Election Study.
+
+### Polls Data
+
+Each poll provides an estimate of the day’s average support for the two main party candidates.
+With $y_i$ representing the number of respondents supporting the Democratic candidate in poll $i$, 
+and with $n_i$ being the total number of respondents supporting one of the major party candidates. We start with the binomial sampling model:
+
+\begin{equation}
+y_i \sim \text{Binomial}(\theta_i, n_i)
+\end{equation}
+
+- States pools are modeled as:
+\begin{equation}
+\theta_i = \text{logit}^{-1}\left(\mu^b_{s[i] t[i]} + \alpha_i + \zeta^{\text{state}}_{i} + \xi_{s[i]}\right)
+\end{equation}
+It includes terms for state-level support $\mu^b_{s[i] t[i]}$ , which represents the underlying support for the $s,t$ Democrat in state s at time t, shared bias $\alpha_i$, measurement error $\zeta^{\text{state}}_{i}$, and state-level error $\xi_{s[i]}$.  
+These biases arise because opinion polls are not random samples of the voting population. 
+
+- National pools are modeled as:
+\begin{equation}
+\theta_i = \text{logit}^{-1}\left(\sum_{s = 1}^S  w_s \mu^b_{s t[i]} + \alpha_i + \zeta^{\text{national}}_{i} + \sum_{s = 1}^S w_s \xi_{s}\right)
+\end{equation}
+National polls are modeled similarly to state ones, but with weighted averages of state-level parameters $w_s$, 
+that sum to 1 and which are proportional to the number of votes in the state in the previous election.
+It is important to notice that this model does not account for third parties.
+
+The shared bias $\alpha_i$ contains adjustments for house effects $\mu^c_{p [i]}$, polling population effects$\mu^r_{r [i]}$, and mode effects $\mu^m_{m [i]}$ to correct potential biases.
+\begin{equation}
+\alpha_i = \mu^c_{p [i]} +\mu^r_{r [i]} + \mu^m_{m [i]} + z\epsilon_{t[i]} 
+\end{equation}
+
+an adjustment trend term for nonresponse bias $\epsilon$ and an indicator $z$ equal to $1$ if the pollster does not adjust for partisanship and $0$ otherwise,
+
+```{r priors_0, include=FALSE}
+# create priors -----------------------------------------------------------
+# read in abramowitz data
+#setwd(here("data/"))
+abramowitz <- read.csv('data/abramowitz_data.csv') %>% 
+  filter(year < 2016)
+
+# train a caret model to predict demvote with incvote ~ q2gdp + juneapp + year:q2gdp + year:juneapp 
+prior_model <- lm(
+  incvote ~  juneapp + q2gdp, #+ year:q2gdp + year:juneapp
+  data = abramowitz
+)
+
+# make predictions
+national_mu_prior <- predict(prior_model,newdata = tibble(q2gdp = 1.3,
+                                                          juneapp = 1))
+
+# on correct scale
+national_mu_prior <- national_mu_prior / 100
+
+
+# Mean of the mu_b_prior
+mu_b_prior <- logit(national_mu_prior + prior_diff_score)
+
+
+```
+
+```{r priors, results='hide', message=FALSE, warning=FALSE}
+# create priors -----------------------------------------------------------
+# read in abramowitz data
+prior_in <- read_csv("data/state_priors_08_12_16.csv") %>%
+  filter(date <= RUN_DATE) %>%
+  group_by(state) %>%
+  arrange(date) %>%
+  filter(date == max(date)) %>%
+  select(state,pred) %>%
+  ungroup() %>%
+  arrange(state)
+
+  
+mu_b_prior <- logit(prior_in$pred + 0.00)
+names(mu_b_prior) <- prior_in$state
+names(mu_b_prior) == names(prior_diff_score) # correct order?
+
+national_mu_prior <- weighted.mean(inv.logit(mu_b_prior), state_weights)
+
+
+
+```
+
+```{r priors_1, include = FALSE}
+
+# The model uses national polls to complement state polls 
+# when estimating the national term mu_a.
+# One problem until early September, 
+# was that voters in polled states were different from average voters :
+# Several solid red states still hadn't been polled, 
+# the weighted average of state polls was slightly more pro-obama than national polls.
+
+score_among_polled <- sum(states2012[all_polled_states[-1],]$obama_count)/
+  sum(states2012[all_polled_states[-1],]$obama_count + 
+        states2012[all_polled_states[-1],]$mccain_count)
+
+alpha_prior <- log(states2012$national_score[1]/score_among_polled)
+
+```
+
+```{r, echo=FALSE, results = "asis"}
+# Calculate the values
+prior_vote <- round(national_mu_prior, 3)
+national_sd <- round(mu_b_T_scale, 3)
+
+# Generate the LaTeX formatted output
+cat(sprintf('
+\\begin{center}
+\\textbf{\\large{Prior Biden two-party vote is %s}} \\\\
+\\textbf{\\large{With a national standard deviation of %s}}
+\\end{center}
+', 
+prior_vote, national_sd))
+```
+
+
+#### State-level trends
+
+At the state-level the author models the development of public opinion as a correlated random walk,
+using prior information from fundamentals-based predictions on Election Day. This approach allows for the sharing of 
+information across states and over time. The random walk component connects days with polls and interpolates for days without polls, 
+with uncertainty being a function of the prior model’s encoded public opinion change and polling data from other states.
+
+The model assumes that similar states will exhibit similar trends in the absence of specific data,
+which is enforced through a correlation matrix. This matrix, derived from past election results and other state-level predictors 
+like education, is used to ensure reasonable results for national and state-level swings. 
+Off-diagonal elements smaller than zero are set to zero, and the matrix is scaled to achieve the desired degree of day-to-day change.
+
+\begin{equation}
+\mu^b_{t}|\mu^b_{t - 1} \sim \text{MVN}(\mu^b_{t - 1}, \Sigma^b)
+\end{equation}
+
+where $\mu^b_{t}$ is the state-level support estimate, evolving as a multivariate normal distribution around the previous day’s estimate,
+with covariance $\Sigma^b$. This structure allows the model to capture and adjust for state-level opinion dynamics, 
+providing a comprehensive and adaptive framework for election forecasting.
+
+#### House, population and mode effect
+
+
+House Effects:
+House effects refer to systematic biases that arise from the methodology and practices of different polling organizations.
+Each polling firm might have distinct approaches in terms of sampling, question phrasing, and weighting responses. 
+These differences can lead to systematic deviations in the results provided by different firms. To adjust for these effects, 
+the model includes terms that account for the biases introduced by individual polling organizations, 
+ensuring that the estimates are not skewed by the peculiarities of any single pollster.
+
+Population Effects:
+Population effects stem from the differences in the demographic and political composition of the populations that different polls sample. 
+Polls may target different subsets of the population, such as registered voters, likely voters, or the general adult population, 
+each of which might have different voting intentions. The model incorporates adjustments to account for these differences, 
+ensuring that the estimates reflect the overall voting population rather than any specific subgroup.
+
+Mode Effects:
+Mode effects arise from the different modes of data collection used in polling, such as telephone interviews, online surveys, 
+or face-to-face interviews. Each mode has its own potential biases. For example, telephone surveys might miss younger voters who are less likely 
+to have landlines, while online surveys might over-represent tech-savvy individuals. The model includes adjustments for these mode effects to 
+ensure that the polling data is comparable across different collection methods.
+
+\begin{equation}
+\mu^c \sim \text{Normal}(0, \sigma^c)
+\end{equation}
+
+\begin{equation}
+\mu^r \sim \text{Normal}(0, \sigma^r)
+\end{equation}
+
+\begin{equation}
+\mu^m \sim \text{Normal}(0, \sigma^m)
+\end{equation}
+
+#### Partison nonresponse adjustment term
+
+The authors suggest that nonresponse bias occurs when certain groups, such as partisans, are less likely to respond to polls, 
+leading to systematic errors in estimating voter support.
+
+To mitigate this issue, the model incorporates an autoregressive process to allow the partisan adjustment to vary over time at the national level.
+This process helps account for the dynamic nature of partisan nonresponse, which can fluctuate throughout the election cycle. 
+Specifically, the adjustment term is designed to capture the difference between polls that adjust for partisanship and those that do not.
+
+\begin{equation}
+\epsilon_1|\rho, \sigma^\epsilon \sim \text{Normal}\left(0, \frac{1}{\sqrt{1 - \rho^2}}\sigma^\epsilon\right)
+\end{equation}
+
+\begin{equation}
+\epsilon_t|\epsilon_{t - 1}, \rho, \sigma^\epsilon  \sim \text{Normal}\left(\rho \epsilon_{t - 1}, \sigma^\epsilon\right), \quad \text{for } t = 2, \dots, T
+\end{equation}
+
+\begin{equation}
+\rho \sim \text{Normal}(0.7, 0.1)
+\end{equation}
+
+This adjustment helps to estimate the extent to which non-adjusting polls are biased, 
+ensuring a more accurate aggregation of polling data by accounting for the partisan composition of the sample. 
+This correction is crucial for providing reliable election forecasts, particularly in regions where polling practices may vary significantly.
+
+#### Measurament error
+
+These terms are unidentifiable, meaning that for a given number  N  of polls, there are  N  independently and identically distributed terms. 
+The model adjusts for uncertainty in the poll estimates to account for poll-specific design effects or deviations from truly random samples.
+
+\begin{equation}
+\zeta^{\text{national}}_i \sim \text{Normal}(0, \sigma^{\text{national}})
+\end{equation}
+
+
+\begin{equation}
+\zeta^{\text{state}}_i \sim \text{Normal}(0, \sigma^{\text{state}})
+\end{equation}
+
+These adjustments allow the model to handle measurement errors that go beyond the stated margin of error provided by the polls, 
+ensuring more accurate and reliable estimates of voter preferences.
+
+#### Correlated state errors
+
+the paper discusses the inclusion of state and national-level polling error terms to account for unmodeled measurement
+error beyond the stated margin of error in each poll. The authors treat state-level polling error terms as correlated 
+across states using a scaled version of the same correlation matrix employed for changes in underlying opinions across states.
+
+\begin{equation}
+\xi \sim \text{MVN}(0, \Sigma^{\xi})
+\end{equation}
+
+This approach acknowledges that polling errors in different states can be correlated. 
+The correlation matrix $\Sigma^{\xi}$ is derived from past election results and relevant state-level predictors, such as education levels. 
+Off-diagonal elements of the correlation matrix that are smaller than zero are set to zero, 
+and the matrix is scaled to achieve the desired degree of day-to-day change.
+
+This method ensures that the estimates reflect the assumption that, in the absence of specific data, similar states will exhibit similar trends, 
+allowing for reasonable results in both national and state-level swings. The same relationship is considered for national polls, 
+where the weighted sum of the state-level error term is included as the national-level error, 
+with weights proportional to voter turnout in the previous presidential election.
+
+### General intuition
+
+The fundamentals-based prediction serves as the prior for the state-level forecasts on Election Day. 
+This prediction is based on historical data and various predictors, such as economic conditions and political factors.
+The random walk prior for state-level support ($\mu^b_t$) is visualized as moving backward in time from Election Day to the current day of polling.
+This approach allows the model to dynamically update its prior for Election Day using poll-based forecasts.
+
+The combined model updates the Election Day prior with the poll-based forecast by incorporating daily polling data. 
+The hierarchical structure of the model, which includes multiple error terms, helps to avoid over-certainty that can result from simple poll averaging. 
+This hierarchical approach enables the model to borrow strength across states and over time, ensuring that the estimates are robust and reflective of both state-level and national trends.
+
+### Model application
+
+```{r include=FALSE}
+## polls that adjust for party
+adjusters <- c(
+  "ABC",
+  "Washington Post",
+  "Ipsos",
+  "Pew",
+  "YouGov",
+  "NBC"
+)
+# passing data to Stan ----------------------------------------------------
+N_state_polls <- nrow(df %>% filter(index_s != 52))
+N_national_polls <- nrow(df %>% filter(index_s == 52))
+T <- as.integer(round(difftime(election_day, first_day)))
+current_T <- max(df$poll_day)
+S <- 51
+P <- length(unique(df$pollster))
+M <- length(unique(df$method))
+Pop <- length(unique(df$polltype))
+
+state <- df %>% filter(index_s != 52) %>% pull(index_s)
+day_national <- df %>% filter(index_s == 52) %>% pull(poll_day) 
+day_state <- df %>% filter(index_s != 52) %>% pull(poll_day) 
+poll_national <- df %>% filter(index_s == 52) %>% pull(index_p) 
+poll_state <- df %>% filter(index_s != 52) %>% pull(index_p) 
+poll_mode_national <- df %>% filter(index_s == 52) %>% pull(index_m) 
+poll_mode_state <- df %>% filter(index_s != 52) %>% pull(index_m) 
+poll_pop_national <- df %>% filter(index_s == 52) %>% pull(index_pop) 
+poll_pop_state <- df %>% filter(index_s != 52) %>% pull(index_pop) 
+
+n_democrat_national <- df %>% filter(index_s == 52) %>% pull(n_biden)
+n_democrat_state <- df %>% filter(index_s != 52) %>% pull(n_biden)
+n_two_share_national <- df %>% filter(index_s == 52) %>% transmute(n_two_share = n_trump + n_biden) %>% pull(n_two_share)
+n_two_share_state <- df %>% filter(index_s != 52) %>% transmute(n_two_share = n_trump + n_biden) %>% pull(n_two_share)
+unadjusted_national <- df %>% mutate(unadjusted = ifelse(!(pollster %in% adjusters), 1, 0)) %>% filter(index_s == 52) %>% pull(unadjusted)
+unadjusted_state <- df %>% mutate(unadjusted = ifelse(!(pollster %in% adjusters), 1, 0)) %>% filter(index_s != 52) %>% pull(unadjusted)
+
+# priors (on the logit scale)
+sigma_measure_noise_national <- 0.04
+sigma_measure_noise_state <- 0.04
+sigma_c <- 0.06
+sigma_m <- 0.04
+sigma_pop <- 0.04
+sigma_e_bias <- 0.02
+
+polling_bias_scale <- as.numeric(polling_bias_scale) * 4
+mu_b_T_scale <- as.numeric(mu_b_T_scale) * 4
+random_walk_scale <- as.numeric(random_walk_scale) * 4
+
+# put the data in a list to export to Stan
+data <- list(
+  N_national_polls = N_national_polls,
+  N_state_polls = N_state_polls,
+  T = T,
+  S = S,
+  P = P,
+  M = M,
+  Pop = Pop,
+  state = state,
+  state_weights = state_weights,
+  day_state = as.integer(day_state),
+  day_national = as.integer(day_national),
+  poll_state = poll_state,
+  poll_national = poll_national,
+  poll_mode_national = poll_mode_national, 
+  poll_mode_state = poll_mode_state,
+  poll_pop_national = poll_pop_national, 
+  poll_pop_state = poll_pop_state,
+  unadjusted_national = unadjusted_national,
+  unadjusted_state = unadjusted_state,
+  n_democrat_national = n_democrat_national,
+  n_democrat_state = n_democrat_state,
+  n_two_share_national = n_two_share_national,
+  n_two_share_state = n_two_share_state,
+  sigma_measure_noise_national = sigma_measure_noise_national,
+  sigma_measure_noise_state = sigma_measure_noise_state,
+  mu_b_prior = mu_b_prior,
+  sigma_c = sigma_c,
+  sigma_m = sigma_m,
+  sigma_pop = sigma_pop,
+  sigma_e_bias = sigma_e_bias,
+  # covariance matrices
+  # ss_cov_mu_b_walk = state_covariance_mu_b_walk,
+  # ss_cov_mu_b_T = state_covariance_mu_b_T,
+  # ss_cov_poll_bias = state_covariance_polling_bias
+  state_covariance_0 = state_covariance_0,
+  polling_bias_scale = polling_bias_scale,
+  mu_b_T_scale = mu_b_T_scale,
+  random_walk_scale = random_walk_scale
+)
+
+nan_info <- sapply(data, function(x) any(is.na(x)))
+nan_info[nan_info]
+
+
+# run the Stan model ------------------------------------------------------
+message("Running model...")
+# model options
+#("scripts/config_model/poll_model_2020_no_partisan_correction.stan")
+#("scripts/config_model/poll_model_2020_no_mode_adjustment.stan")
+#("scripts/config_model/poll_model_2020.stan")
+
+# if rstan, uncomment these lines:
+
+# model <- rstan::stan_model("config_model/poll_model_2020.stan")
+
+# out <- rstan::sampling(model, data = data,
+#                        refresh = n_refresh,
+#                        chains  = n_chains, iter = 500, warmup = 250
+# )
+
+# else if cmdstan, uncomment these
+#model <- cmdstanr::cmdstan_model("us-potus-model/scripts/config_model/poll_model_2020.stan",compile=TRUE,force=TRUE)
+#fit <- model$sample(
+#  data = data,
+#  seed = 1843,
+#  parallel_chains = n_cores,
+#  chains = n_chains,
+#  iter_warmup = n_warmup,
+#  iter_sampling = n_sampling,
+#  refresh = n_refresh
+#)
+
+#out <- rstan::read_stan_csv(fit$output_files())
+#rm(fit)
+#gc()
+
+# save model for today
+#write_rds(out, sprintf('models/stan_model_%s.rds',RUN_DATE),compress = 'gz')
+
+# extracting results ----
+out <- read_rds(sprintf('models/stan_model_%s.rds',RUN_DATE))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+library(knitr)
+library(kableExtra)
+library(dplyr)
+
+# Summarizing the data
+data_summary <- data.frame(
+  Variable = c("N_national_polls", "N_state_polls", "T", "S", "P", "M", "Pop", 
+               "state_weights", "day_state", "day_national", "poll_state", "poll_national", 
+               "poll_mode_national", "poll_mode_state", "poll_pop_national", "poll_pop_state", 
+               "unadjusted_national", "unadjusted_state", "n_democrat_national", "n_democrat_state", 
+               "n_two_share_national", "n_two_share_state", "sigma_measure_noise_national", 
+               "sigma_measure_noise_state", "mu_b_prior", "sigma_c", "sigma_m", "sigma_pop", 
+               "sigma_e_bias", "state_covariance_0", "polling_bias_scale", "mu_b_T_scale", 
+               "random_walk_scale"),
+  Description = c("Number of national polls", "Number of state polls", "Total time periods", "Number of states", 
+                  "Number of pollsters", "Number of modes", "Population vector", "State weights vector", 
+                  "Days for state polls", "Days for national polls", "State polls data", "National polls data", 
+                  "National poll modes", "State poll modes", "National poll populations", "State poll populations", 
+                  "Unadjusted national polls", "Unadjusted state polls", "Democrat counts in national polls", 
+                  "Democrat counts in state polls", "Two-party share in national polls", "Two-party share in state polls", 
+                  "Measurement noise for national polls", "Measurement noise for state polls", "Prior for state effects", 
+                  "Standard deviation of common error", "Standard deviation of mode effect", "Standard deviation of population effect", 
+                  "Standard deviation of bias error", "Initial state covariance matrix", "Polling bias scale", 
+                  "Scale for prior election day prediction", "Scale for state level random walk"),
+  Summary = c(round(data$N_national_polls,2), round(data$N_state_polls,2), round(data$T,2), round(data$S,2), 
+              round(data$P,2), round(data$M,2), 
+              paste0("Mean: ", round(mean(data$Pop), 2), " SD: ", round(sd(data$Pop), 2)), 
+              paste0("Mean: ", round(mean(data$state_weights), 2), " SD: ", round(sd(data$state_weights), 2)), 
+              paste0("Min: ", round(min(data$day_state), 2), " Max: ", round(max(data$day_state), 2), " Median: ", round(median(data$day_state), 2)), 
+              paste0("Min: ", round(min(data$day_national), 2), " Max: ", round(max(data$day_national), 2), " Median: ", round(median(data$day_national), 2)), 
+              paste0("Min: ", round(min(data$poll_state), 2), " Max: ", round(max(data$poll_state), 2), " Median: ", round(median(data$poll_state), 2)), 
+              paste0("Min: ", round(min(data$poll_national), 2), " Max: ", round(max(data$poll_national), 2), " Median: ", round(median(data$poll_national), 2)), 
+              paste0("Min: ", round(min(data$poll_mode_national), 2), " Max: ", round(max(data$poll_mode_national), 2), " Median: ", round(median(data$poll_mode_national), 2)), 
+              paste0("Min: ", round(min(data$poll_mode_state), 2), " Max: ", round(max(data$poll_mode_state), 2), " Median: ", round(median(data$poll_mode_state), 2)), 
+              paste0("Min: ", round(min(data$poll_pop_national), 2), " Max: ", round(max(data$poll_pop_national), 2), " Median: ", round(median(data$poll_pop_national), 2)), 
+              paste0("Min: ", round(min(data$poll_pop_state), 2), " Max: ", round(max(data$poll_pop_state), 2), " Median: ", round(median(data$poll_pop_state), 2)), 
+              paste0("Min: ", round(min(data$unadjusted_national), 2), " Max: ", round(max(data$unadjusted_national), 2), " Median: ", round(median(data$unadjusted_national), 2)), 
+              paste0("Min: ", round(min(data$unadjusted_state), 2), " Max: ", round(max(data$unadjusted_state), 2), " Median: ", round(median(data$unadjusted_state), 2)), 
+              paste0("Min: ", round(min(data$n_democrat_national), 2), " Max: ", round(max(data$n_democrat_national), 2), " Median: ", round(median(data$n_democrat_national), 2)), 
+              paste0("Min: ", round(min(data$n_democrat_state), 2), " Max: ", round(max(data$n_democrat_state), 2), " Median: ", round(median(data$n_democrat_state), 2)), 
+              paste0("Min: ", round(min(data$n_two_share_national), 2), " Max: ", round(max(data$n_two_share_national), 2), " Median: ", round(median(data$n_two_share_national), 2)), 
+              paste0("Min: ", round(min(data$n_two_share_state), 2), " Max: ", round(max(data$n_two_share_state), 2), " Median: ", round(median(data$n_two_share_state), 2)), 
+              paste0("Mean: ", round(mean(data$sigma_measure_noise_national), 2), " SD: ", round(sd(data$sigma_measure_noise_national), 2)), 
+              paste0("Mean: ", round(mean(data$sigma_measure_noise_state), 2), " SD: ", round(sd(data$sigma_measure_noise_state), 2)), 
+              paste0("Mean: ", round(mean(data$mu_b_prior), 2), " SD: ", round(sd(data$mu_b_prior), 2)), 
+              round(mean(data$sigma_c), 2), round(mean(data$sigma_m), 2), round(mean(data$sigma_pop), 2), round(mean(data$sigma_e_bias), 2), 
+              "Covariance matrix (too large to summarize)", 
+              round(mean(data$polling_bias_scale), 2), round(mean(data$mu_b_T_scale), 2), round(mean(data$random_walk_scale), 2))
+)
+
+# Printing the summary table
+kable(data_summary, caption = "Summary of Data Variables") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+```
+
+# Results 
+
+### State-level Democratic Vote Share (Prior vs. Posterior)
+
+This plot compares the prior and posterior distributions of the Democratic vote share for each state. 
+The prior distributions are based on historical data, while the posterior distributions are updated with current polling data.
+ Each point represents the mean vote share, and the error bars show the 95% credible intervals.
+
+```{r mu_b_T_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+
+y <- MASS::mvrnorm(1000, mu_b_prior, Sigma = state_covariance_mu_b_T)
+mu_b_T_posterior_draw <- rstan::extract(out, pars = "mu_b")[[1]][,,254]
+mu_b_T_prior_draws <- mean_low_high(y, states = colnames(y), id = "prior")
+mu_b_T_posterior_draws <- mean_low_high(mu_b_T_posterior_draw, states = colnames(y), id = "posterior")
+mu_b_T <- rbind(mu_b_T_prior_draws, mu_b_T_posterior_draws)
+mu_b_t_plt <- mu_b_T %>% arrange(mean) %>%
+  ggplot(.) +
+  geom_point(aes(y = mean, x = reorder(state, mean), color = type), position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = low, ymax = high, x = state, color = type), width = 0, position = position_dodge(width = 0.5)) +
+  coord_flip() +
+  theme_bw()
+mu_b_t_plt
+```
+
+### Pollster Effects (Prior vs. Posterior)
+
+This plot shows the prior and posterior distributions of the pollster effects. 
+These effects capture the systematic bias introduced by different pollsters. 
+Each point represents the mean pollster effect, and the error bars show the 95% credible intervals.
+
+```{r mu_c_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+
+mu_c_posterior_draws <- rstan::extract(out, pars = "mu_c")[[1]]
+mu_c_posterior_draws <- data.frame(draws = as.vector(mu_c_posterior_draws),
+                                   index_p = sort(rep(seq(1, P), dim(mu_c_posterior_draws)[1])), 
+                                   type = "posterior")
+mu_c_prior_draws <- data.frame(draws = rnorm(P * 1000, 0, sigma_c),
+                               index_p = sort(rep(seq(1, P), 1000)), 
+                               type = "prior")
+mu_c_draws <- rbind(mu_c_posterior_draws, mu_c_prior_draws)
+pollster <- df %>% select(pollster, index_p) %>% distinct()
+mu_c_draws <- merge(mu_c_draws, pollster, by = "index_p", all.x = TRUE)
+mu_c_draws <- mu_c_draws %>%
+  group_by(pollster, type) %>%
+  summarize(mean = mean(draws), 
+            low = mean(draws) - 1.96 * sd(draws),
+            high = mean(draws) + 1.96 * sd(draws))
+mu_c_plt <- mu_c_draws %>% 
+  arrange(mean) %>% 
+  filter(pollster %in% (df %>% group_by(pollster) %>% 
+                          summarise(n=n()) %>% filter(n>=5) %>% pull(pollster))) %>%
+  ggplot(.) +
+  geom_point(aes(y = mean, x = reorder(pollster, mean), color = type), 
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = low, ymax = high, x = pollster, color = type), 
+                width = 0, position = position_dodge(width = 0.5)) +
+  coord_flip() +
+  theme_bw()
+mu_c_plt
+
+```
+
+### Mode Effects (Prior vs. Posterior)
+
+This plot displays the prior and posterior distributions of the mode effects.
+ Mode effects capture the biases introduced by different polling methods (e.g., phone vs. online surveys).
+  Each point represents the mean mode effect, and the error bars show the 95% credible intervals.
+
+```{r mu_m_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+
+mu_m_posterior_draws <- rstan::extract(out, pars = "mu_m")[[1]] 
+mu_m_posterior_draws <- data.frame(draws = as.vector(mu_m_posterior_draws),
+                                   index_m = sort(rep(seq(1, M), dim(mu_m_posterior_draws)[1])), 
+                                   type = "posterior")
+mu_m_prior_draws <- data.frame(draws = rnorm(M * 1000, 0, sigma_m),
+                               index_m = sort(rep(seq(1, M), 1000)), 
+                               type = "prior")
+mu_m_draws <- rbind(mu_m_posterior_draws, mu_m_prior_draws) 
+method <- df %>% select(method, index_m) %>% distinct()
+mu_m_draws <- merge(mu_m_draws, method, by = "index_m", all.x = TRUE)
+mu_m_draws <- mu_m_draws %>%
+  group_by(method, type) %>%
+  summarize(mean = mean(draws), 
+            low = mean(draws) - 1.96 * sd(draws),
+            high = mean(draws) + 1.96 * sd(draws))
+mu_m_plt <- mu_m_draws %>% arrange(mean) %>%
+  ggplot(.) +
+  geom_point(aes(y = mean, x = reorder(method, mean), color = type), 
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = low, ymax = high, x = method, color = type), 
+                width = 0, position = position_dodge(width = 0.5)) +
+  coord_flip() +
+  theme_bw()
+mu_m_plt
+```
+
+
+### State-level Polling Bias (Prior vs. Posterior)
+
+This plot shows the prior and posterior distributions of the state-level polling biases. 
+Polling bias reflects the systematic errors in polling data for each state. 
+Each point represents the mean bias, and the error bars show the 95% credible intervals.
+
+```{r polling_bias_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+polling_bias_posterior <- rstan::extract(out, pars = "polling_bias")[[1]]
+polling_bias_posterior %>% apply(.,2,sd) / 4
+polling_bias_posterior_draws <- data.frame(draws = as.vector(polling_bias_posterior),
+                                   index_s = sort(rep(seq(1, S), dim(polling_bias_posterior)[1])), 
+                                   type = "posterior")
+y <- MASS::mvrnorm(1000, rep(0, S), Sigma = state_covariance_polling_bias)
+polling_bias_prior_draws <- data.frame(draws = as.vector(y),
+                                   index_s = sort(rep(seq(1, S), dim(y)[1])), 
+                                    type = "prior")
+polling_bias_draws <- rbind(polling_bias_posterior_draws, polling_bias_prior_draws) 
+states <- data.frame(index_s = 1:51, states = rownames(state_correlation_polling))
+polling_bias_draws <- merge(polling_bias_draws, states, by = "index_s", all.x = TRUE)
+polling_bias_draws <- polling_bias_draws %>%
+  group_by(states, type) %>%
+  summarize(mean = mean(draws), 
+            low = mean(draws) - 1.96 * sd(draws),
+            high = mean(draws) + 1.96 * sd(draws))
+polling_bias_plt <- polling_bias_draws %>%
+  ggplot(.) +
+  geom_point(aes(y = mean, x = reorder(states, mean), color = type), 
+             position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = low, ymax = high, x = states, color = type), 
+                width = 0, position = position_dodge(width = 0.5)) +
+  coord_flip() +
+  theme_bw() 
+polling_bias_plt
+```
+
+### Adjusted Polling Error Bias Over Time
+
+This plot tracks the adjusted polling error bias over time. 
+The adjusted bias is computed by correcting for the mean biases of non-adjusted pollsters. 
+Each line represents a different simulation trial.
+
+```{r Adjusted_Polling_Error_Bias_Plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+poll_terms <- rstan::extract(out, pars = "mu_c")[[1]]
+non_adjusters <- df %>% 
+  mutate(unadjusted = ifelse(!(pollster %in% adjusters), 1, 0)) %>% 
+  select(unadjusted, index_p) %>%
+  distinct() %>%
+  arrange(index_p)
+
+e_bias <- rstan::extract(out, pars = "e_bias")[[1]]
+plt_adjusted <- lapply(1:100, function(x) {
+  tibble(e_bias_draw = e_bias[x,] - mean(poll_terms[x, non_adjusters[non_adjusters$unadjusted == 0, 2]$index_p])
+          + mean(poll_terms[x, non_adjusters[non_adjusters$unadjusted == 1, 2]$index_p]),
+         trial = x) %>%
+    mutate(date = min(df$end) + row_number())
+}) %>%
+do.call('bind_rows', .) %>%
+ggplot(., aes(x=date, y=e_bias_draw, group=trial)) +
+geom_line(alpha=0.2)
+plt_adjusted
+```
+
+### Unadjusted Polling Error Bias Over Time
+
+This plot shows the unadjusted polling error bias over time. The unadjusted bias includes the raw errors from all pollsters. 
+Each line represents a different simulation trial.
+
+```{r Unadjusted_Polling_Error_Bias_Plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+plt_unadjusted <- lapply(1:100, function(x) {
+  tibble(e_bias_draw = e_bias[x,], trial = x) %>%
+    mutate(date = min(df$end) + row_number())
+}) %>%
+do.call('bind_rows', .) %>%
+ggplot(., aes(x=date, y=e_bias_draw, group=trial)) +
+geom_line(alpha=0.2)
+plt_unadjusted
+```
+
+```{r Predicted_Score_Plot, echo=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+predicted_score <- rstan::extract(out, pars = "predicted_score")[[1]]
+single_draw <- as.data.frame(predicted_score[,dim(predicted_score)[2],])
+single_draw[100,]
+names(single_draw) <- colnames(state_correlation_polling)
+single_draw %>% 
+  select(AL, CA, FL, MN, NC, NM, RI, WI) %>%  #NV,FL,WI,MI,NH,OH,IA,NC,IN
+  cor
+```
+
+### Predicted Percent Vote for Biden
+
+This plot shows the predicted percent vote for Biden across different states and time periods. 
+It includes the 95% credible intervals and the probability of winning for each state.
+
+```{r Biden_Percent_Plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+pct_biden <- pblapply(1:dim(predicted_score)[3], function(x) {
+  temp <- predicted_score[,,x]
+  tibble(low = apply(temp, 2, function(x) { quantile(x, 0.025) }),
+         high = apply(temp, 2, function(x) { quantile(x, 0.975) }),
+         mean = apply(temp, 2, function(x) { mean(x) }),
+         prob = apply(temp, 2, function(x) { mean(x > 0.5) }),
+         state = x)
+}) %>%
+do.call('bind_rows', .)
+
+pct_biden$state <- colnames(state_correlation_polling)[pct_biden$state]
+
+pct_biden <- pct_biden %>%
+  group_by(state) %>%
+  mutate(t = row_number() + min(df$begin)) %>%
+  ungroup()
+
+# National
+pct_biden_natl <- pblapply(1:dim(predicted_score)[1], function(x) {
+  temp <- predicted_score[x,,] %>% as.data.frame()
+  names(temp) <- colnames(state_correlation_polling)
+  tibble(natl_vote = apply(temp, MARGIN = 1, function(y) { weighted.mean(y, state_weights) })) %>%
+    mutate(t = row_number() + min(df$begin)) %>%
+    mutate(draw = x)
+}) %>%
+do.call('bind_rows', .)
+
+pct_biden_natl <- pct_biden_natl %>%
+  group_by(t) %>%
+  summarise(low = quantile(natl_vote, 0.025),
+            high = quantile(natl_vote, 0.975),
+            mean = mean(natl_vote),
+            prob = mean(natl_vote > 0.5)) %>%
+  mutate(state = '--')
+
+# Bind state and national vote
+pct_biden <- pct_biden %>%
+  bind_rows(pct_biden_natl) %>%
+  arrange(desc(mean))
+
+# Look at specific states
+ex_states <- c('IA','FL','OH','WI','MI','PA','AZ','NC','NH','NV','GA','MN')
+pct_biden %>% filter(t == RUN_DATE, state %in% c(ex_states, '--')) %>% mutate(se = (high - mean) / 1.96) %>% dplyr::select(-t) %>% print
+pct_biden %>% filter(t == election_day, state %in% c(ex_states, '--')) %>% mutate(se = (high - mean) / 1.96) %>% dplyr::select(-t) %>% print
+
+# Plot results
+mu_b_t_results_plt <- rbind(mu_b_T_prior_draws, mu_b_T_posterior_draws) %>% 
+  bind_rows(
+    politicaldata::pres_results %>% filter(year == 2016) %>%
+      mutate(mean = dem / (dem + rep)) %>%
+      select(state, mean) %>%
+      mutate(type = 'actual')
+  ) %>%
+  arrange(mean) %>%
+  filter(state != 'DC') %>%
+  ggplot(.) +
+  geom_point(aes(y = mean, x = reorder(state, mean), color = type), position = position_dodge(width = 0.5)) +
+  geom_errorbar(aes(ymin = low, ymax = high, x = state, color = type), width = 0, position = position_dodge(width = 0.5)) +
+  coord_flip() +
+  theme_bw()
+mu_b_t_results_plt
+```
+
+### Probability of Biden Winning by State
+
+This map visualizes the probability of Biden winning each state based on the current polling data. 
+The colors range from red (low probability) to blue (high probability), with white indicating a 50% probability.
+
+```{r map_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+map.gg <- urbnmapr::states %>%
+  left_join(pct_biden %>% filter(t == max(t)) %>%
+              select(state_abbv=state,prob)) %>%
+  ggplot(aes(x=long,y=lat,group=group,fill=prob)) +
+  geom_polygon()  + 
+  coord_map("albers",lat0=39, lat1=45) +
+  scale_fill_gradient2(high='blue',low='red',mid='white',midpoint=0.5) +
+  theme_void()
+
+print(map.gg)
+```
+
+
+### National Polls Over Time, Predicted Electoral Votes Over Time, and State Polls Over Time
+
+
+The first plot shows the national polling data for Biden over time. 
+It includes the mean predicted vote share, the 95% credible intervals, and individual poll results.
+
+The second plot shows the predicted number of electoral votes for Biden over time.
+ It includes the median number of electoral votes, the 95% credible intervals, and the probability of winning 270 or more electoral votes.
+
+The third plot shows the state-level polling data for Biden over time for selected states.
+ It includes the mean predicted vote share, the 95% credible intervals, and individual poll results.
+
+
+```{r national_polls_plot, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+identifier <- paste0(Sys.Date()," || " , out@model_name)
+
+natl_polls.gg <- pct_biden %>%
+  filter(state == '--') %>%
+  left_join(df %>% select(state,t,pct_biden,method)) %>% # plot over time
+  # plot
+  ggplot(.,aes(x=t)) +
+  geom_ribbon(aes(ymin=low,ymax=high),col=NA,alpha=0.2) +
+  geom_hline(yintercept = 0.5) +
+  geom_hline(yintercept = national_mu_prior,linetype=2) +
+  geom_point(aes(y=pct_biden,shape=method),alpha=0.3) +
+  geom_line(aes(y=mean)) +
+  facet_wrap(~state) +
+  theme_minimal()  +
+  theme(legend.position = 'none') +
+  scale_x_date(limits=c(ymd('2023-10-01','2024-12-08')),date_breaks='1 month',date_labels='%b') +
+  scale_y_continuous(breaks=seq(0,1,0.02)) + 
+  labs(subtitletitle=sprintf('biden natl pct | mean = %s | p(win) = %s',
+                             round(pct_biden[pct_biden$state=='--' & pct_biden$t==election_day,]$mean*100,1),
+                             round(pct_biden[pct_biden$state=='--' & pct_biden$t==election_day,]$prob,2)))
+
+```
+
+
+```{r national_evs_plot, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# electoral college by simulation
+draws <- pblapply(1:dim(predicted_score)[3],
+             function(x){
+               # pred is mu_a + mu_b for the past, just mu_b for the future
+               pct_biden <- predicted_score[,,x]
+               
+               pct_biden <- pct_biden %>%
+                 as.data.frame() %>%
+                 mutate(draw = row_number()) %>%
+                 gather(t,pct_biden,1:(ncol(.)-1)) %>%
+                 mutate(t = as.numeric(gsub('V','',t)) + min(df$begin),
+                        state = colnames(state_correlation_polling)[x]) 
+         }) %>% do.call('bind_rows',.)
+
+
+sim_evs <- draws %>%
+  left_join(states2012 %>% select(state,ev),by='state') %>%
+  group_by(t,draw) %>%
+  summarise(dem_ev = sum(ev * (pct_biden > 0.5))) %>%
+  group_by(t) %>%
+  summarise(mean_dem_ev = mean(dem_ev),
+            median_dem_ev = median(dem_ev),
+            high_dem_ev = quantile(dem_ev,0.975),
+            low_dem_ev = quantile(dem_ev,0.025),
+            prob = mean(dem_ev >= 270))
+
+natl_evs.gg <-  ggplot(sim_evs, aes(x=t)) +
+  geom_hline(yintercept = 270) +
+  geom_line(aes(y=median_dem_ev)) +
+  geom_ribbon(aes(ymin=low_dem_ev,ymax=high_dem_ev),alpha=0.2) +
+  theme_minimal()  +
+  theme(legend.position = 'none') +
+  scale_x_date(limits=c(ymd('2023-10-01','2024-12-08')),date_breaks='1 month',date_labels='%b') +
+  labs(subtitletitle=sprintf('biden evs | median = %s | p(win) = %s',
+                             round(sim_evs[sim_evs$t==election_day,]$median_dem_ev),
+                             round(sim_evs[sim_evs$t==election_day,]$prob,2)))
+
+```
+
+```{r State_Polls_Plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=11, fig.width=11}
+state_polls.gg <- pct_biden %>%
+  filter(state %in% ex_states) %>%
+  left_join(df %>% select(state,t,pct_biden,method)) %>% 
+  left_join(tibble(state = names(mu_b_prior),
+                   prior = inv.logit(mu_b_prior)) ) %>%
+  ggplot(.,aes(x=t,col=state)) +
+  geom_ribbon(aes(ymin=low,ymax=high),col=NA,alpha=0.2) +
+  geom_hline(yintercept = 0.5) +
+  geom_hline(aes(yintercept = prior),linetype=2) +
+  geom_point(aes(y=pct_biden,shape=method),alpha=0.3) +
+  geom_line(aes(y=mean)) +
+  facet_wrap(~state) +
+  theme_minimal()  +
+  theme(legend.position = 'top') +
+  guides(color='none') +
+  scale_x_date(limits=c(ymd('2023-10-01','2024-12-08')),date_breaks='1 month',date_labels='%b') +
+  labs(subtitle='pct_biden state')
+
+grid.arrange(natl_polls.gg, natl_evs.gg, state_polls.gg, 
+             layout_matrix = rbind(c(1,1,3,3,3),
+                                   c(2,2,3,3,3)),
+             top = identifier
+)
+```
+
+### Difference from National Vote Over Time
+
+This plot shows the difference between the predicted state-level vote share for Biden and the national vote share over time. 
+It highlights the states where Biden’s support deviates significantly from the national trend.
+
+```{r Difference_from_National_Over_Time_Plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+pct_biden[pct_biden$state != '--',] %>%
+  left_join(pct_biden[pct_biden$state=='--',] %>%
+              select(t,pct_biden_national=mean), by='t') %>%
+  mutate(diff=mean-pct_biden_national) %>%
+  group_by(state) %>%
+  mutate(last_prob = last(prob)) %>%
+  filter(state %in% ex_states) %>%
+  ggplot(.,aes(x=t,y=diff,col=state)) +
+  geom_hline(yintercept=0.0) +
+  geom_line() +
+  geom_label_repel(data = . %>% 
+                     filter(t==max(t),
+                            prob > 0.1 & prob < 0.9),
+                   aes(label=state)) +
+  theme_minimal()  +
+  theme(legend.position = 'none') +
+  scale_x_date(limits=c(ymd('2023-10-01','2024-12-08')),date_breaks='1 month',date_labels='%b') +
+  scale_y_continuous(breaks=seq(-1,1,0.01)) +
+  labs(subtitle = identifier)
+
+```
+
+### Final Electoral Vote Distribution
+
+This plot shows the distribution of predicted electoral votes for Biden based on the final simulations.
+ It highlights the probability of Biden winning the required 270 electoral votes.
+
+```{r Final_EV_distribution_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center', fig.height=3.8, message=FALSE, warning=FALSE, results='hide'}
+# final EV distribution
+final_evs <- draws %>%
+  left_join(states2012 %>% select(state,ev),by='state') %>%
+  filter(t==max(t)) %>%
+  group_by(draw) %>%
+  summarise(dem_ev = sum(ev* (pct_biden > 0.5)))
+
+ev.gg <- ggplot(final_evs,aes(x=dem_ev,
+                     fill=ifelse(dem_ev>=270,'Democratic','Republican'))) +
+  geom_vline(xintercept = 270) +
+  geom_histogram(binwidth=1) +
+  theme_minimal() +
+  theme(legend.position = 'top',
+        panel.grid.minor = element_blank()) +
+  scale_fill_manual(name='Electoral College winner',values=c('Democratic'='#3A4EB1','Republican'='#E40A04')) +
+  labs(x='Democratic electoral college votes',
+       subtitle=sprintf("p(dem win) = %s",round(mean(final_evs$dem_ev>=270),2)) )
+
+
+print(ev.gg)
+```
+
+
+
+
+# Conlusions 
+In conclusion, this dynamic Bayesian forecasting model offers a robust and sophisticated tool for election forecasting, 
+combining rigorous statistical methodologies with practical adjustments for real-world polling biases.
+Key innovations in the model include the incorporation of partisan nonresponse adjustments and the careful treatment of measurement and correlated state errors. 
+These features address some of the critical shortcomings observed in past election forecasts,
+ such as those seen in the 2016 presidential election and the Brexit referendum. 
+ By accounting for biases and uncertainties inherent in polling data, the model provides a nuanced and reliable prediction of election outcomes.
+# Citations (PROVVISORIO) 
+[@Linzer] 
+[@Heidemanns] 
+[@Alexander]
+[@Rigdon]
+[@Jensen]
+[@Gelman]
+[@Stoetzer]
+
+# References
+
+
+
+

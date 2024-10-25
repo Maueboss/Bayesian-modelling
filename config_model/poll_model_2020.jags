@@ -1,0 +1,58 @@
+model {
+
+  for (s in 1:S) {
+    for (t in 1:T) {
+      mu_b[s, t] <- cholesky_ss_cov_mu_b_T[s] * raw_mu_b_T[s] + mu_b_prior[s]
+    }
+  }
+
+  for (p in 1:P) {
+    mu_c[p] ~ dnorm(0, 1)
+  }
+
+  for (m in 1:M) {
+    mu_m[m] ~ dnorm(0, 1)
+  }
+
+  for (pop in 1:Pop) {
+    mu_pop[pop] ~ dnorm(0, 1)
+  }
+
+  for (t in 1:T) {
+    if (t==1) {
+      e_bias[t] <- raw_e_bias[t] * sigma_e_bias
+    } else {
+      e_bias[t] <- mu_e_bias + rho_e_bias * (e_bias[t - 1] - mu_e_bias) + raw_e_bias[t] * sigma_rho
+    }
+  }
+
+  for (n in 1:N_state_polls) {
+    logit_pi_democrat_state[n] <- mu_b[state[n], day_state[n]] + 
+                                  mu_c[poll_state[n]] + 
+                                  mu_m[poll_mode_state[n]] + 
+                                  mu_pop[poll_pop_state[n]] + 
+                                  unadjusted_state[n] * e_bias[day_state[n]] +
+                                  raw_measure_noise_state[n] * sigma_measure_noise_state + 
+                                  polling_bias[state[n]]
+    n_democrat_state[n] ~ dbin(logit_pi_democrat_state[n], n_two_share_state[n])
+  }
+
+  for (n in 1:N_national_polls) {
+    logit_pi_democrat_national[n] <- mu_b[state[n], day_national[n]] +  
+                                      mu_c[poll_national[n]] + 
+                                      mu_m[poll_mode_national[n]] + 
+                                      mu_pop[poll_pop_national[n]] + 
+                                      unadjusted_national[n] * e_bias[day_national[n]] +
+                                      raw_measure_noise_national[n] * sigma_measure_noise_national +
+                                      national_polling_bias_average
+    n_democrat_national[n] ~ dbin(logit_pi_democrat_national[n], n_two_share_national[n])
+  }
+
+  # Generate quantities
+  for (s in 1:S) {
+    for (t in 1:T) {
+      predicted_score[t, s] <- inv_logit(mu_b[s, t])
+    }
+  }
+
+}
