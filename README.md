@@ -5,8 +5,8 @@ This repository contains a Bayesian hierarchical model designed to forecast the 
 
 **Data Sources**
 
-	1.	Polls: Nationwide and statewide trial-heat results collected from various pollsters.
-	2.	Economic and Social Data: Data such as economic growth rates, presidential approval, geographical features, and demographic statistics.
+1. Polls: Nationwide and statewide trial-heat results collected from various pollsters.
+2. Economic and Social Data: Data such as economic growth rates, presidential approval, geographical features, and demographic statistics.
 
 Polls data is sourced from FiveThirtyEight.
 
