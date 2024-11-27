@@ -23,3 +23,7 @@ The model uses Hamiltonian Monte Carlo (HMC) sampling for efficient Bayesian inf
 - State-level trends: Modeled as a correlated random walk to capture evolving public opinion across states.
 - Bias Adjustments: Corrects for house, population, and mode effects in polling data, as well as partisan nonresponse.
 - Covariance Structures: Takes into account the spatial correlation of demographic and electoral features.
+
+[Click here to access the folder with data and other documents used for the project](https://mega.nz/folder/uAN1URIK#bXOq06WCxmGEIYvnQ-shvw)
+
+
